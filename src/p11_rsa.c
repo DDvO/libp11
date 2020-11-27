@@ -29,10 +29,6 @@
 
 static int rsa_ex_index = 0;
 
-#if OPENSSL_VERSION_NUMBER < 0x10100003L
-#define EVP_PKEY_get0_RSA(key) ((key)->pkey.rsa)
-#endif
-
 static RSA *pkcs11_rsa(PKCS11_KEY *key)
 {
 	EVP_PKEY *evp_key = pkcs11_get_key(key, key->isPrivate);
@@ -177,52 +173,57 @@ int pkcs11_verify(int type, const unsigned char *m, unsigned int m_len,
 static RSA *pkcs11_get_rsa(PKCS11_KEY *key)
 {
 	RSA *rsa;
-	PKCS11_KEY *keys = NULL;
-	unsigned int i, count = 0;
+	PKCS11_KEY *keys;
+	unsigned int i, count;
+	BIGNUM *rsa_n = NULL, *rsa_e = NULL;
 
-	rsa = RSA_new();
-	if (rsa == NULL)
+	/* Retrieve the modulus */
+	if (key_getattr_bn(key, CKA_MODULUS, &rsa_n))
 		return NULL;
 
-	/* Retrieve the modulus and the public exponent */
-	if (key_getattr_bn(key, CKA_MODULUS, &rsa->n) ||
-			key_getattr_bn(key, CKA_PUBLIC_EXPONENT, &rsa->e)) {
-		RSA_free(rsa);
-		return NULL;
+	/* Retrieve the public exponent */
+	if (!key_getattr_bn(key, CKA_PUBLIC_EXPONENT, &rsa_e)) {
+		if (!BN_is_zero(rsa_e)) /* A valid public exponent */
+			goto success;
+		BN_clear_free(rsa_e);
+		rsa_e = NULL;
 	}
-	if(!BN_is_zero(rsa->e)) /* The public exponent was retrieved */
-		return rsa;
-	BN_clear_free(rsa->e);
-	/* In case someone modifies this function to execute RSA_free()
-	 * before a valid BN value is assigned to rsa->e */
-	rsa->e = NULL;
 
 	/* The public exponent was not found in the private key:
 	 * retrieve it from the corresponding public key */
 	if (!PKCS11_enumerate_public_keys(KEY2TOKEN(key), &keys, &count)) {
-		for(i = 0; i < count; i++) {
-			BIGNUM *pubmod;
+		for (i = 0; i < count; i++) {
+			BIGNUM *pubmod = NULL;
 
-			if (key_getattr_bn(&keys[i], CKA_MODULUS, &pubmod))
-				continue; /* Failed to retrieve the modulus */
-			if (BN_cmp(rsa->n, pubmod) == 0) { /* The key was found */
+			if (!key_getattr_bn(&keys[i], CKA_MODULUS, &pubmod)) {
+				int found = BN_cmp(rsa_n, pubmod) == 0;
+
 				BN_clear_free(pubmod);
-				if (key_getattr_bn(&keys[i], CKA_PUBLIC_EXPONENT, &rsa->e))
-					continue; /* Failed to retrieve the public exponent */
-				return rsa;
-			} else {
-				BN_clear_free(pubmod);
+				if (found && !key_getattr_bn(&keys[i],
+						CKA_PUBLIC_EXPONENT, &rsa_e))
+					goto success;
 			}
 		}
 	}
 
 	/* Last resort: use the most common default */
-	rsa->e = BN_new();
-	if(rsa->e && BN_set_word(rsa->e, RSA_F4))
-		return rsa;
+	rsa_e = BN_new();
+	if (rsa_e && BN_set_word(rsa_e, RSA_F4))
+		goto success;
 
-	RSA_free(rsa);
+failure:
+	if (rsa_n)
+		BN_clear_free(rsa_n);
+	if (rsa_e)
+		BN_clear_free(rsa_e);
 	return NULL;
+
+success:
+	rsa = RSA_new();
+	if (!rsa)
+		goto failure;
+	RSA_set0_key(rsa, rsa_n, rsa_e, NULL);
+	return rsa;
 }
 
 /*
@@ -250,7 +251,7 @@ static EVP_PKEY *pkcs11_get_evp_key_rsa(PKCS11_KEY *key)
 
 #if OPENSSL_VERSION_NUMBER < 0x01010000L
 	/* RSA_FLAG_SIGN_VER is no longer needed since OpenSSL 1.1 */
-	rsa->flags |= RSA_FLAG_SIGN_VER;
+	RSA_set_flags(rsa, RSA_FLAG_SIGN_VER);
 #endif
 	RSA_set_ex_data(rsa, rsa_ex_index, key);
 	RSA_free(rsa); /* Drops our reference to it */
@@ -263,7 +264,7 @@ int pkcs11_get_key_modulus(PKCS11_KEY *key, BIGNUM **bn)
 	RSA *rsa = pkcs11_rsa(key);
 	if (rsa == NULL)
 		return 0;
-	*bn = BN_dup(rsa->n);
+	*bn = BN_dup(RSA_get0_n(rsa));
 	return *bn == NULL ? 0 : 1;
 }
 
@@ -273,7 +274,7 @@ int pkcs11_get_key_exponent(PKCS11_KEY *key, BIGNUM **bn)
 	RSA *rsa = pkcs11_rsa(key);
 	if (rsa == NULL)
 		return 0;
-	*bn = BN_dup(rsa->e);
+	*bn = BN_dup(RSA_get0_e(rsa));
 	return *bn == NULL ? 0 : 1;
 }
 
@@ -345,13 +346,14 @@ RSA_METHOD *PKCS11_get_rsa_method(void)
 
 	if (ops == NULL) {
 		alloc_rsa_ex_index();
-		ops = OPENSSL_malloc(sizeof(RSA_METHOD));
+		ops = RSA_meth_dup(RSA_get_default_method());
 		if (ops == NULL)
 			return NULL;
-		memcpy(ops, RSA_get_default_method(), sizeof(RSA_METHOD));
-		ops->rsa_priv_enc = pkcs11_rsa_priv_enc_method;
-		ops->rsa_priv_dec = pkcs11_rsa_priv_dec_method;
-		ops->finish = pkcs11_rsa_free_method;
+		RSA_meth_set1_name(ops, "libp11 RSA method");
+		RSA_meth_set_flags(ops, 0);
+		RSA_meth_set_priv_enc(ops, pkcs11_rsa_priv_enc_method);
+		RSA_meth_set_priv_dec(ops, pkcs11_rsa_priv_dec_method);
+		RSA_meth_set_finish(ops, pkcs11_rsa_free_method);
 	}
 	return ops;
 }

@@ -238,12 +238,12 @@ static int pkcs11_store_key(PKCS11_TOKEN * token, EVP_PKEY * pk,
 		RSA *rsa = pk->pkey.rsa;
 #endif
 		pkcs11_addattr_int(attrs + n++, CKA_KEY_TYPE, CKK_RSA);
-		pkcs11_addattr_bn(attrs + n++, CKA_MODULUS, rsa->n);
-		pkcs11_addattr_bn(attrs + n++, CKA_PUBLIC_EXPONENT, rsa->e);
+		pkcs11_addattr_bn(attrs + n++, CKA_MODULUS, RSA_get0_n(rsa));
+		pkcs11_addattr_bn(attrs + n++, CKA_PUBLIC_EXPONENT, RSA_get0_e(rsa));
 		if (type == CKO_PRIVATE_KEY) {
-			pkcs11_addattr_bn(attrs + n++, CKA_PRIVATE_EXPONENT, rsa->d);
-			pkcs11_addattr_bn(attrs + n++, CKA_PRIME_1, rsa->p);
-			pkcs11_addattr_bn(attrs + n++, CKA_PRIME_2, rsa->q);
+			pkcs11_addattr_bn(attrs + n++, CKA_PRIVATE_EXPONENT, RSA_get0_d(rsa));
+			pkcs11_addattr_bn(attrs + n++, CKA_PRIME_1, RSA_get0_p(rsa));
+			pkcs11_addattr_bn(attrs + n++, CKA_PRIME_2, RSA_get0_q(rsa));
 		}
 	} else {
 		pkcs11_zap_attrs(attrs, n);

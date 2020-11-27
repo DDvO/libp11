@@ -233,10 +233,10 @@ loggedin:
 	ERR_free_strings();
 #if OPENSSL_VERSION_NUMBER >= 0x10100004L
 	/* OpenSSL version >= 1.1.0-pre4 */
-	ERR_remove_thread_state();
+	ERR_remove_thread_state(NULL);
 #elif OPENSSL_VERSION_NUMBER >= 0x10000000L
 	/* OpenSSL version >= 1.0.0 */
-	ERR_remove_thread_state(NULL);
+	ERR_remove_thread_state();
 #else
 	/* OpenSSL version < 1.0.0 */
 	ERR_remove_state(0);
